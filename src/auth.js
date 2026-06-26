@@ -134,6 +134,16 @@ export function initAuth() {
         
         if (isSignUpVerification) {
           localStorage.setItem('invibeUser', JSON.stringify(tempUserData));
+          // Register user on server so it can be accessed from other devices
+          try {
+            fetch(`${API_URL}/api/register-user`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ username: tempUserData.username, userData: tempUserData })
+            }).catch(err => console.error('Failed to sync user to server:', err));
+          } catch (err) {
+            console.error('Failed to sync user to server:', err);
+          }
           if (profileUploadModal) {
             profileUploadModal.classList.add('active');
             if (window.startLiveCamera) window.startLiveCamera();
@@ -144,6 +154,16 @@ export function initAuth() {
             const user = JSON.parse(userStr);
             user.password = tempNewPassword;
             localStorage.setItem('invibeUser', JSON.stringify(user));
+            // Sync password update to server
+            try {
+              fetch(`${API_URL}/api/register-user`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: user.username, userData: user })
+              }).catch(err => console.error('Failed to sync password to server:', err));
+            } catch (err) {
+              console.error('Failed to sync password to server:', err);
+            }
           }
           localStorage.setItem('invibeIsLoggedIn', 'true');
           if (authView) authView.classList.add('hidden');
@@ -277,33 +297,47 @@ export function initAuth() {
     });
   }
 
-  // Age Validation Logic
-  if (dobInput) {
-    dobInput.addEventListener('change', (e) => {
-      const dob = new Date(e.target.value);
-      if (isNaN(dob.getTime())) return;
-      
-      const today = new Date();
-      let age = today.getFullYear() - dob.getFullYear();
-      const m = today.getMonth() - dob.getMonth();
-      if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) {
-        age--;
-      }
-
-      if (age >= 18) {
-        ageCheckbox.classList.add('checked');
-        ageWarning.style.display = 'none';
-        createAccountBtn.disabled = false;
-      } else {
-        ageCheckbox.classList.remove('checked');
-        ageWarning.style.display = 'block';
-        createAccountBtn.disabled = true;
-      }
-    });
-  }
-
   // Toggle Sign In / Sign Up / Forgot Password Mode
   let currentMode = 'signup'; // 'signup', 'signin', 'forgot'
+
+  function handleAgeValidation() {
+    if (currentMode !== 'signup') return;
+    if (!dobInput || !dobInput.value) {
+      if (createAccountBtn) createAccountBtn.disabled = true;
+      if (ageCheckbox) ageCheckbox.classList.remove('checked');
+      return;
+    }
+    const dob = new Date(dobInput.value);
+    if (isNaN(dob.getTime())) {
+      if (createAccountBtn) createAccountBtn.disabled = true;
+      if (ageCheckbox) ageCheckbox.classList.remove('checked');
+      return;
+    }
+    
+    const today = new Date();
+    let age = today.getFullYear() - dob.getFullYear();
+    const m = today.getMonth() - dob.getMonth();
+    if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) {
+      age--;
+    }
+
+    if (age >= 18) {
+      if (ageCheckbox) ageCheckbox.classList.add('checked');
+      if (ageWarning) ageWarning.style.display = 'none';
+      if (createAccountBtn) createAccountBtn.disabled = false;
+    } else {
+      if (ageCheckbox) ageCheckbox.classList.remove('checked');
+      if (ageWarning) ageWarning.style.display = 'block';
+      if (createAccountBtn) createAccountBtn.disabled = true;
+    }
+  }
+
+  // Age Validation Logic
+  if (dobInput) {
+    dobInput.addEventListener('change', handleAgeValidation);
+    dobInput.addEventListener('input', handleAgeValidation);
+    dobInput.addEventListener('blur', handleAgeValidation);
+  }
   const toggleBtn = document.getElementById('auth-toggle-btn');
   const toggleText = document.getElementById('auth-toggle-text');
   const title = document.getElementById('auth-form-title');
@@ -407,19 +441,7 @@ export function initAuth() {
     createAccountBtn.textContent = "Create Account";
     
     // Recalculate create account button disabled state based on DOB/Age
-    const dobInput = document.getElementById('auth-dob');
-    if (dobInput && dobInput.value) {
-      const dob = new Date(dobInput.value);
-      const today = new Date();
-      let age = today.getFullYear() - dob.getFullYear();
-      const m = today.getMonth() - dob.getMonth();
-      if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) {
-        age--;
-      }
-      createAccountBtn.disabled = (age < 18);
-    } else {
-      createAccountBtn.disabled = true;
-    }
+    handleAgeValidation();
     
     toggleText.textContent = "Already have an account?";
     toggleBtn.textContent = "Sign In";
@@ -502,22 +524,43 @@ export function initAuth() {
         const usernameVal = document.getElementById('auth-username').value;
         const passwordVal = document.getElementById('auth-password').value;
         
+        let user = null;
         let userStr = localStorage.getItem('invibeUser');
-        if (!userStr) {
-          // Create dummy user if none exists
-          const user = {
+        if (userStr) {
+          const localUser = JSON.parse(userStr);
+          if (localUser.username && localUser.username.toLowerCase() === usernameVal.toLowerCase()) {
+            user = localUser;
+          }
+        }
+        
+        // If not found locally, fetch from backend in-memory DB
+        if (!user) {
+          try {
+            const res = await fetch(`${API_URL}/api/get-user/${encodeURIComponent(usernameVal)}`);
+            if (res.ok) {
+              const data = await res.json();
+              if (data && data.success && data.userData) {
+                user = data.userData;
+                localStorage.setItem('invibeUser', JSON.stringify(user));
+              }
+            }
+          } catch (err) {
+            console.error('Failed to retrieve user from server:', err);
+          }
+        }
+        
+        if (!user) {
+          // Create dummy user if none exists (fallback behavior)
+          user = {
             fullName: 'Hi-Hubble User',
-            email: 'ansoceanversetechnologies@gmail.com', // fallback
+            email: 'ansoceanversetechnologies@gmail.com',
             username: usernameVal || 'hihubble',
             dob: '1990-01-01',
             age: 30,
             password: passwordVal
           };
           localStorage.setItem('invibeUser', JSON.stringify(user));
-          userStr = JSON.stringify(user);
         }
-        
-        const user = JSON.parse(userStr);
 
         // Validate password
         if (user.password && user.password !== passwordVal) {
@@ -554,10 +597,34 @@ export function initAuth() {
           return;
         }
 
+        let user = null;
         let userStr = localStorage.getItem('invibeUser');
-        if (!userStr) {
-          // Create dummy user with this username
-          const user = {
+        if (userStr) {
+          const localUser = JSON.parse(userStr);
+          if (localUser.username && localUser.username.toLowerCase() === usernameVal.toLowerCase()) {
+            user = localUser;
+          }
+        }
+
+        // If not found locally, fetch from backend in-memory DB
+        if (!user) {
+          try {
+            const res = await fetch(`${API_URL}/api/get-user/${encodeURIComponent(usernameVal)}`);
+            if (res.ok) {
+              const data = await res.json();
+              if (data && data.success && data.userData) {
+                user = data.userData;
+                localStorage.setItem('invibeUser', JSON.stringify(user));
+              }
+            }
+          } catch (err) {
+            console.error('Failed to retrieve user from server:', err);
+          }
+        }
+
+        if (!user) {
+          // Create dummy user with this username (fallback behavior)
+          user = {
             fullName: 'Hi-Hubble User',
             email: 'ansoceanversetechnologies@gmail.com',
             username: usernameVal || 'hihubble',
@@ -566,10 +633,8 @@ export function initAuth() {
             password: 'password'
           };
           localStorage.setItem('invibeUser', JSON.stringify(user));
-          userStr = JSON.stringify(user);
         }
 
-        const user = JSON.parse(userStr);
         if (user.username.toLowerCase() !== usernameVal.toLowerCase()) {
           alert("This username is not registered.");
           return;

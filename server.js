@@ -22,6 +22,9 @@ const PORT = process.env.PORT || 3000;
 // Temporary in-memory store for OTPs
 const otps = new Map();
 
+// Temporary in-memory store for registered users (persisted across devices)
+const registeredUsers = new Map();
+
 // Nodemailer Transporter
 const transporter = nodemailer.createTransport({
   service: 'gmail',
@@ -113,6 +116,26 @@ app.post('/api/verify-otp', (req, res) => {
   // Clear OTP on successful verification
   otps.delete(email.toLowerCase());
   res.json({ success: true, message: 'OTP verified successfully' });
+});
+
+// Endpoint to register a user
+app.post('/api/register-user', (req, res) => {
+  const { username, userData } = req.body;
+  if (!username || !userData) {
+    return res.status(400).json({ error: 'Username and userData are required' });
+  }
+  registeredUsers.set(username.toLowerCase(), userData);
+  res.json({ success: true, message: 'User registered successfully on server' });
+});
+
+// Endpoint to get user data
+app.get('/api/get-user/:username', (req, res) => {
+  const username = req.params.username;
+  const userData = registeredUsers.get(username.toLowerCase());
+  if (!userData) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+  res.json({ success: true, userData });
 });
 
 // Fallback all other requests to frontend SPA
