@@ -5538,18 +5538,24 @@ body.chats-view-active #app-main-layout {
   }
 
   /* === FLOATING BUBBLE NAVIGATION ON MOBILE === */
-  /* Show the floating bubble nav on mobile (replaces bottom tab bar) */
-  #floating-bubble-nav,
-  .floating-nav-container,
-  #radial-menu-blur-overlay {
-    display: flex !important;
-  }
-
+  /* Show only the floating bubble orb on mobile (replaces bottom tab bar) */
+  /* The radial menu items remain hidden (opacity:0) until user clicks the orb */
   .floating-nav-container {
+    display: flex !important;
     bottom: 24px !important;
     z-index: 10000 !important;
   }
 
+  /* Only show blur overlay when menu is open */
+  #radial-menu-blur-overlay {
+    display: none !important;
+  }
+
+  .floating-nav-container.open #radial-menu-blur-overlay {
+    display: block !important;
+  }
+
+  /* Slightly smaller bubble orb on mobile */
   .main-glow-bubble {
     transform: scale(0.85);
   }
@@ -5558,20 +5564,14 @@ body.chats-view-active #app-main-layout {
     transform: scale(0.95);
   }
 
-  .radial-menu-wrapper {
-    transform: scale(0.85);
+  /* Tighter radial menu for mobile screens */
+  .floating-nav-container.open .radial-menu-wrapper {
+    transform: translateX(-50%) scale(0.82) !important;
   }
 
   .radial-item-bubble {
-    --distance: 95px !important;
-  }
-
-  #radial-menu-blur-overlay {
-    display: none !important;
-  }
-
-  .floating-nav-container.open #radial-menu-blur-overlay {
-    display: block !important;
+    width: 40px !important;
+    height: 40px !important;
   }
 
   /* Push content up for floating bubble clearance */
