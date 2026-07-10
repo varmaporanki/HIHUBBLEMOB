@@ -1218,6 +1218,8 @@
                 <!-- 4. VIDEO CALL SUB-VIEW -->
                 <div class="chat-sub-panel" id="chat-sub-view-call">
                   <div class="video-call-viewport">
+                    <!-- Hidden audio element for audio-only calls (must not be inside a display:none container) -->
+                    <audio id="remote-audio-element" autoplay playsinline style="position:absolute;width:0;height:0;opacity:0;pointer-events:none;"></audio>
                     
                     <!-- ACTIVE CALL SCREEN -->
                     <div id="video-call-active-screen" class="video-call-screen-layout" style="display: none;">

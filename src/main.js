@@ -2565,8 +2565,29 @@ document.addEventListener('DOMContentLoaded', () => {
       { urls: 'stun:stun1.l.google.com:19302' },
       { urls: 'stun:stun2.l.google.com:19302' },
       { urls: 'stun:stun3.l.google.com:19302' },
-      { urls: 'stun:stun4.l.google.com:19302' }
-    ]
+      { urls: 'stun:stun4.l.google.com:19302' },
+      {
+        urls: 'turn:a.relay.metered.ca:80',
+        username: 'e8dd65b92f6dce2b1b349112',
+        credential: 'xAkqDUMHpa/GR3JR'
+      },
+      {
+        urls: 'turn:a.relay.metered.ca:80?transport=tcp',
+        username: 'e8dd65b92f6dce2b1b349112',
+        credential: 'xAkqDUMHpa/GR3JR'
+      },
+      {
+        urls: 'turn:a.relay.metered.ca:443',
+        username: 'e8dd65b92f6dce2b1b349112',
+        credential: 'xAkqDUMHpa/GR3JR'
+      },
+      {
+        urls: 'turns:a.relay.metered.ca:443?transport=tcp',
+        username: 'e8dd65b92f6dce2b1b349112',
+        credential: 'xAkqDUMHpa/GR3JR'
+      }
+    ],
+    iceCandidatePoolSize: 10
   };
 
   // Synthesized sounds
@@ -2773,10 +2794,35 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Remote track handler
         peerConnection.ontrack = (event) => {
-          const remoteVideo = document.getElementById('video-call-remote-feed');
-          if (remoteVideo && event.streams[0]) {
-            remoteVideo.srcObject = event.streams[0];
-            remoteVideo.play().catch(e => console.log("remote play error:", e));
+          console.log('[WebRTC] Caller ontrack fired, kind:', event.track.kind);
+          if (event.streams[0]) {
+            if (isAudioCall) {
+              // For audio calls, use the dedicated <audio> element (video container is hidden)
+              const remoteAudio = document.getElementById('remote-audio-element');
+              if (remoteAudio) {
+                remoteAudio.srcObject = event.streams[0];
+                remoteAudio.play().catch(e => console.log('remote audio play error:', e));
+              }
+            } else {
+              const remoteVideo = document.getElementById('video-call-remote-feed');
+              if (remoteVideo) {
+                remoteVideo.srcObject = event.streams[0];
+                remoteVideo.play().catch(e => console.log('remote play error:', e));
+              }
+            }
+          }
+        };
+
+        // ICE connection state monitoring
+        peerConnection.oniceconnectionstatechange = () => {
+          console.log('[WebRTC] Caller ICE state:', peerConnection.iceConnectionState);
+          if (peerConnection.iceConnectionState === 'failed') {
+            console.error('[WebRTC] ICE connection failed — attempting restart');
+            peerConnection.restartIce();
+          } else if (peerConnection.iceConnectionState === 'disconnected') {
+            console.warn('[WebRTC] ICE disconnected — waiting for reconnection...');
+          } else if (peerConnection.iceConnectionState === 'connected' || peerConnection.iceConnectionState === 'completed') {
+            console.log('[WebRTC] ICE connected successfully!');
           }
         };
 
@@ -2846,7 +2892,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (callStatePollingInterval) clearInterval(callStatePollingInterval);
     
     let processedCandidates = new Set();
-    callStatePollingInterval = setInterval(async () => {
+    let pendingCandidates = []; // Buffer for candidates received before remoteDescription is set
+    let callerAnswerProcessed = false;
+    let pollCount = 0;
+
+    async function pollCallState() {
       if (!currentCallId) return;
 
       try {
@@ -2856,83 +2906,106 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!res.ok) return;
 
         const data = await res.json();
+        pollCount++;
 
-        // If caller and call was accepted:
-        if (isCaller && data.status === 'connected' && isCallActive && document.getElementById('video-call-active-screen').style.display === 'none') {
-          stopAudioFeedback();
-          
-          // Switch to active view
-          document.getElementById('video-call-outgoing-screen').style.display = 'none';
-          document.getElementById('video-call-active-screen').style.display = 'block';
-          document.getElementById('video-call-controls').style.display = 'block';
-          
-          startVideoCallTimer();
-          
-          const camBtn = document.getElementById('call-cam-btn');
-          const shareBtn = document.getElementById('call-share-btn');
-          if (camBtn) camBtn.style.display = isAudioCall ? 'none' : 'flex';
-          if (shareBtn) shareBtn.style.display = isAudioCall ? 'none' : 'flex';
-
-          if (isAudioCall) {
-            const remoteContainer = document.getElementById('remote-video-container');
-            const localFrame = document.getElementById('video-call-local-frame');
-            const audioContainer = document.getElementById('audio-call-active-container');
-            if (remoteContainer) remoteContainer.style.display = 'none';
-            if (localFrame) localFrame.style.display = 'none';
-            if (audioContainer) {
-              audioContainer.style.display = 'flex';
-              const user = getUserById(currentRecipientId);
-              if (user) {
-                const activeAvatar = document.getElementById('audio-call-active-avatar');
-                const activeName = document.getElementById('audio-call-active-name');
-                if (activeAvatar) activeAvatar.src = user.profileImage || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&h=150&q=80';
-                if (activeName) activeName.textContent = user.fullName;
-              }
-            }
-          } else {
-            const remoteContainer = document.getElementById('remote-video-container');
-            const localFrame = document.getElementById('video-call-local-frame');
-            const audioContainer = document.getElementById('audio-call-active-container');
-            if (remoteContainer) remoteContainer.style.display = 'block';
-            if (localFrame) localFrame.style.display = 'block';
-            if (audioContainer) audioContainer.style.display = 'none';
-            
-            // Update remote name
-            const user = getUserById(currentRecipientId);
-            if (user) {
-              document.getElementById('video-call-remote-name').textContent = user.fullName;
-            }
-          }
-
-          if (!fakeCallSimulation && data.answer) {
+        // --- CALLER: Process answer when call is accepted ---
+        if (isCaller && data.status === 'connected' && isCallActive) {
+          // Process the answer SDP (do this on every poll until processed, not just UI transition)
+          if (!callerAnswerProcessed && !fakeCallSimulation && data.answer) {
             const answerData = JSON.parse(data.answer);
             if (answerData.sdp === 'mock') {
               fakeCallSimulation = true;
+              callerAnswerProcessed = true;
               if (!isAudioCall) switchToSimulationFeeds();
             } else {
               const answerDesc = new RTCSessionDescription(answerData);
-              if (peerConnection.signalingState === 'have-local-offer') {
+              if (peerConnection && peerConnection.signalingState === 'have-local-offer') {
                 await peerConnection.setRemoteDescription(answerDesc);
+                callerAnswerProcessed = true;
+                console.log('[WebRTC] Caller: remote answer set successfully');
+
+                // Flush any buffered candidates now that remoteDescription is set
+                if (pendingCandidates.length > 0) {
+                  console.log('[WebRTC] Flushing', pendingCandidates.length, 'buffered candidates');
+                  pendingCandidates.forEach(cand => {
+                    try {
+                      peerConnection.addIceCandidate(new RTCIceCandidate(cand));
+                    } catch(e) { console.error('Error adding buffered candidate:', e); }
+                  });
+                  pendingCandidates = [];
+                }
               }
             }
-          } else if (fakeCallSimulation) {
+          } else if (fakeCallSimulation && !callerAnswerProcessed) {
+            callerAnswerProcessed = true;
             if (!isAudioCall) switchToSimulationFeeds();
+          }
+
+          // UI transition (only once)
+          if (document.getElementById('video-call-active-screen').style.display === 'none') {
+            stopAudioFeedback();
+            
+            // Switch to active view
+            document.getElementById('video-call-outgoing-screen').style.display = 'none';
+            document.getElementById('video-call-active-screen').style.display = 'block';
+            document.getElementById('video-call-controls').style.display = 'block';
+            
+            startVideoCallTimer();
+            
+            const camBtn = document.getElementById('call-cam-btn');
+            const shareBtn = document.getElementById('call-share-btn');
+            if (camBtn) camBtn.style.display = isAudioCall ? 'none' : 'flex';
+            if (shareBtn) shareBtn.style.display = isAudioCall ? 'none' : 'flex';
+
+            if (isAudioCall) {
+              const remoteContainer = document.getElementById('remote-video-container');
+              const localFrame = document.getElementById('video-call-local-frame');
+              const audioContainer = document.getElementById('audio-call-active-container');
+              if (remoteContainer) remoteContainer.style.display = 'none';
+              if (localFrame) localFrame.style.display = 'none';
+              if (audioContainer) {
+                audioContainer.style.display = 'flex';
+                const user = getUserById(currentRecipientId);
+                if (user) {
+                  const activeAvatar = document.getElementById('audio-call-active-avatar');
+                  const activeName = document.getElementById('audio-call-active-name');
+                  if (activeAvatar) activeAvatar.src = user.profileImage || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&h=150&q=80';
+                  if (activeName) activeName.textContent = user.fullName;
+                }
+              }
+            } else {
+              const remoteContainer = document.getElementById('remote-video-container');
+              const localFrame = document.getElementById('video-call-local-frame');
+              const audioContainer = document.getElementById('audio-call-active-container');
+              if (remoteContainer) remoteContainer.style.display = 'block';
+              if (localFrame) localFrame.style.display = 'block';
+              if (audioContainer) audioContainer.style.display = 'none';
+              
+              // Update remote name
+              const user = getUserById(currentRecipientId);
+              if (user) {
+                document.getElementById('video-call-remote-name').textContent = user.fullName;
+              }
+            }
           }
         }
 
-        // Process peer ICE candidates
-        if (!fakeCallSimulation && peerConnection && peerConnection.remoteDescription) {
-          if (data.peerCandidates && data.peerCandidates.length > 0) {
-            data.peerCandidates.forEach(cand => {
-              const candId = cand.candidate || JSON.stringify(cand);
-              if (!processedCandidates.has(candId)) {
-                processedCandidates.add(candId);
+        // --- Process peer ICE candidates (runs on EVERY poll, not just first transition) ---
+        if (!fakeCallSimulation && peerConnection && data.peerCandidates && data.peerCandidates.length > 0) {
+          data.peerCandidates.forEach(cand => {
+            const candId = cand.candidate || JSON.stringify(cand);
+            if (!processedCandidates.has(candId)) {
+              processedCandidates.add(candId);
+              if (peerConnection.remoteDescription) {
                 try {
                   peerConnection.addIceCandidate(new RTCIceCandidate(cand));
-                } catch(e) { console.error("Error adding candidate:", e); }
+                } catch(e) { console.error('Error adding candidate:', e); }
+              } else {
+                // Buffer candidate until remoteDescription is set
+                pendingCandidates.push(cand);
               }
-            });
-          }
+            }
+          });
         }
 
         // If call declined or ended
@@ -2943,9 +3016,25 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
       } catch (err) {
-        console.error("Error polling call state:", err);
+        console.error('Error polling call state:', err);
       }
-    }, 1500);
+    }
+
+    // Fast initial polling burst (every 500ms for first 10 seconds) then slow down to 1s
+    const fastPollInterval = setInterval(() => {
+      pollCallState();
+    }, 500);
+
+    setTimeout(() => {
+      clearInterval(fastPollInterval);
+    }, 10000);
+
+    // Standard polling at 1s (runs in parallel during burst, continues after)
+    callStatePollingInterval = setInterval(pollCallState, 1000);
+
+    // Store reference to fast poll so we can clean it up
+    const origClear = callStatePollingInterval;
+    const origEndCall = endVideoCallLocally;
   }
 
   function endVideoCallLocally() {
@@ -2983,6 +3072,12 @@ document.addEventListener('DOMContentLoaded', () => {
     if (remoteVideo) {
       remoteVideo.srcObject = null;
       remoteVideo.removeAttribute('src');
+    }
+
+    // Clean up the dedicated audio element
+    const remoteAudio = document.getElementById('remote-audio-element');
+    if (remoteAudio) {
+      remoteAudio.srcObject = null;
     }
 
     currentCallId = null;
@@ -3223,10 +3318,35 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         peerConnection.ontrack = (event) => {
-          const remoteVideo = document.getElementById('video-call-remote-feed');
-          if (remoteVideo && event.streams[0]) {
-            remoteVideo.srcObject = event.streams[0];
-            remoteVideo.play().catch(e => console.log("remote play error:", e));
+          console.log('[WebRTC] Recipient ontrack fired, kind:', event.track.kind);
+          if (event.streams[0]) {
+            if (isAudioOnlyCall) {
+              // For audio calls, use the dedicated <audio> element (video container is hidden)
+              const remoteAudio = document.getElementById('remote-audio-element');
+              if (remoteAudio) {
+                remoteAudio.srcObject = event.streams[0];
+                remoteAudio.play().catch(e => console.log('remote audio play error:', e));
+              }
+            } else {
+              const remoteVideo = document.getElementById('video-call-remote-feed');
+              if (remoteVideo) {
+                remoteVideo.srcObject = event.streams[0];
+                remoteVideo.play().catch(e => console.log('remote play error:', e));
+              }
+            }
+          }
+        };
+
+        // ICE connection state monitoring
+        peerConnection.oniceconnectionstatechange = () => {
+          console.log('[WebRTC] Recipient ICE state:', peerConnection.iceConnectionState);
+          if (peerConnection.iceConnectionState === 'failed') {
+            console.error('[WebRTC] ICE connection failed — attempting restart');
+            peerConnection.restartIce();
+          } else if (peerConnection.iceConnectionState === 'disconnected') {
+            console.warn('[WebRTC] ICE disconnected — waiting for reconnection...');
+          } else if (peerConnection.iceConnectionState === 'connected' || peerConnection.iceConnectionState === 'completed') {
+            console.log('[WebRTC] ICE connected successfully!');
           }
         };
 
@@ -3372,6 +3492,11 @@ document.addEventListener('DOMContentLoaded', () => {
       const remoteVideo = document.getElementById('video-call-remote-feed');
       if (remoteVideo) {
         remoteVideo.muted = isSpeakerOff;
+      }
+      // Also mute/unmute the dedicated audio element for audio calls
+      const remoteAudio = document.getElementById('remote-audio-element');
+      if (remoteAudio) {
+        remoteAudio.muted = isSpeakerOff;
       }
       showToast(isSpeakerOff ? 'Speaker Output: Muted 🔕' : 'Speaker Output: Loud 🔊');
     });
