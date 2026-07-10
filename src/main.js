@@ -2775,10 +2775,8 @@ document.addEventListener('DOMContentLoaded', () => {
         peerConnection.ontrack = (event) => {
           const remoteVideo = document.getElementById('video-call-remote-feed');
           if (remoteVideo && event.streams[0]) {
-            if (!isAudioOnly) {
-              remoteVideo.srcObject = event.streams[0];
-              remoteVideo.play().catch(e => console.log("remote play error:", e));
-            }
+            remoteVideo.srcObject = event.streams[0];
+            remoteVideo.play().catch(e => console.log("remote play error:", e));
           }
         };
 
@@ -3227,10 +3225,8 @@ document.addEventListener('DOMContentLoaded', () => {
         peerConnection.ontrack = (event) => {
           const remoteVideo = document.getElementById('video-call-remote-feed');
           if (remoteVideo && event.streams[0]) {
-            if (!isAudioOnlyCall) {
-              remoteVideo.srcObject = event.streams[0];
-              remoteVideo.play().catch(e => console.log("remote play error:", e));
-            }
+            remoteVideo.srcObject = event.streams[0];
+            remoteVideo.play().catch(e => console.log("remote play error:", e));
           }
         };
 
