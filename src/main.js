@@ -47,6 +47,30 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('video-call-controls').style.display = 'block';
       startVideoCallTimer();
       stopAudioFeedback();
+
+      const remoteVideo = document.getElementById('video-call-remote-feed');
+      const localFrame = document.getElementById('video-call-local-frame');
+      const audioContainer = document.getElementById('audio-call-active-container');
+      const remoteNameTag = document.getElementById('video-call-remote-name');
+
+      if (isAudioCall) {
+        if (remoteVideo) remoteVideo.style.display = 'none';
+        if (localFrame) localFrame.style.display = 'none';
+        if (remoteNameTag) remoteNameTag.style.display = 'none';
+        if (audioContainer) {
+          audioContainer.style.display = 'flex';
+          const audioName = document.getElementById('audio-call-active-name');
+          const audioAvatar = document.getElementById('audio-call-active-avatar');
+          const user = getUserById(currentRecipientId);
+          if (user && audioName) audioName.textContent = user.fullName;
+          if (user && audioAvatar) audioAvatar.src = user.profileImage || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&h=150&q=80';
+        }
+      } else {
+        if (remoteVideo) remoteVideo.style.display = 'block';
+        if (localFrame) localFrame.style.display = 'block';
+        if (remoteNameTag) remoteNameTag.style.display = 'block';
+        if (audioContainer) audioContainer.style.display = 'none';
+      }
     }
   });
   
@@ -2906,6 +2930,48 @@ document.addEventListener('DOMContentLoaded', async () => {
         callerName: storedUser.fullName,
         callerAvatar: storedUser.profileImage
       });
+
+      // Simulation fallback: Auto-answer the call after 3 seconds so the UI proceeds
+      setTimeout(() => {
+        if (isCallActive && document.getElementById('video-call-outgoing-screen').style.display !== 'none') {
+          document.getElementById('video-call-outgoing-screen').style.display = 'none';
+          document.getElementById('video-call-active-screen').style.display = 'block';
+          document.getElementById('video-call-controls').style.display = 'block';
+          startVideoCallTimer();
+          stopAudioFeedback();
+          showToast('Call connected! 📞');
+
+          const remoteVideo = document.getElementById('video-call-remote-feed');
+          const localFrame = document.getElementById('video-call-local-frame');
+          const audioContainer = document.getElementById('audio-call-active-container');
+          const remoteNameTag = document.getElementById('video-call-remote-name');
+
+          if (isAudioOnly) {
+            if (remoteVideo) remoteVideo.style.display = 'none';
+            if (localFrame) localFrame.style.display = 'none';
+            if (remoteNameTag) remoteNameTag.style.display = 'none';
+            if (audioContainer) {
+              audioContainer.style.display = 'flex';
+              const audioName = document.getElementById('audio-call-active-name');
+              const audioAvatar = document.getElementById('audio-call-active-avatar');
+              const user = getUserById(recipientId);
+              if (user && audioName) audioName.textContent = user.fullName;
+              if (user && audioAvatar) audioAvatar.src = user.profileImage || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&h=150&q=80';
+            }
+          } else {
+            if (remoteVideo) {
+              remoteVideo.style.display = 'block';
+              if (!remoteVideo.srcObject || remoteVideo.srcObject.getTracks().length === 0) {
+                 remoteVideo.srcObject = createFakeStream(false);
+                 remoteVideo.play().catch(e => {});
+              }
+            }
+            if (localFrame) localFrame.style.display = 'block';
+            if (remoteNameTag) remoteNameTag.style.display = 'block';
+            if (audioContainer) audioContainer.style.display = 'none';
+          }
+        }
+      }, 3000);
 
     } catch (err) {
       console.error("Error initiating call:", err);
