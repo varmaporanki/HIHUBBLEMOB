@@ -5,13 +5,19 @@ import { io } from 'socket.io-client';
 export let socket;
 
 document.addEventListener('DOMContentLoaded', async () => {
+  // API_URL for REST API calls (served by Vercel)
   const API_URL = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
     ? 'http://localhost:3000'
     : window.location.origin;
 
+  // SIGNALING_URL for WebSocket signaling + TURN credentials (served by Render)
+  const SIGNALING_URL = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+    ? 'http://localhost:3000'
+    : (import.meta.env.VITE_SIGNALING_URL || window.location.origin);
+
   initAuth();
 
-  socket = io(API_URL);
+  socket = io(SIGNALING_URL, { transports: ['websocket', 'polling'] });
   
   const storedUserStr = localStorage.getItem('invibeUser');
   if (storedUserStr) {
@@ -96,7 +102,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   async function fetchTurnCredentials() {
     try {
-      const res = await fetch(`${API_URL}/api/turn-credentials`);
+      const res = await fetch(`${SIGNALING_URL}/api/turn-credentials`);
       if (res.ok) {
         const token = await res.json();
         return { iceServers: token.iceServers };
@@ -2654,7 +2660,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   let isCaller = false;
   let currentRecipientId = null;
   let localScreenStream = null;
-  let fakeCallSimulation = false;
+
   let isAudioCall = false;
 
   let rtcConfig = {
@@ -2804,38 +2810,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     socket.emit('ice-candidate', { targetId, candidate });
   }
 
-  function createFakeStream(isAudioOnly) {
-    const AudioContext = window.AudioContext || window.webkitAudioContext;
-    const ctx = new AudioContext();
-    const oscillator = ctx.createOscillator();
-    const dst = ctx.createMediaStreamDestination();
-    oscillator.start();
-    oscillator.connect(dst);
-    const audioTrack = dst.stream.getAudioTracks()[0];
-    audioTrack.enabled = false;
-
-    if (isAudioOnly) {
-      return new MediaStream([audioTrack]);
-    }
-
-    const canvas = document.createElement('canvas');
-    canvas.width = 640;
-    canvas.height = 480;
-    const canvasCtx = canvas.getContext('2d');
-    
-    setInterval(() => {
-      canvasCtx.fillStyle = '#1e1e1e';
-      canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
-      canvasCtx.fillStyle = '#ffffff';
-      canvasCtx.font = '30px Arial';
-      canvasCtx.fillText('Simulated Video Stream', 150, 240);
-    }, 1000);
-
-    const videoStream = canvas.captureStream(15);
-    const videoTrack = videoStream.getVideoTracks()[0];
-
-    return new MediaStream([audioTrack, videoTrack]);
-  }
 
   async function initiateVideoCall(recipientId, isAudioOnly = false) {
     if (isCallActive) return;
@@ -2866,13 +2840,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         ? { video: false, audio: true } 
         : { video: true, audio: true };
 
-      try {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('Not supported');
-        localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
-      } catch (err) {
-        console.warn('Camera/Mic error or unavailable. Using simulated stream.', err);
-        localStream = createFakeStream(isAudioOnly);
-      }
+      localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
 
       const localVideo = document.getElementById('video-call-local-feed');
       const localFrame = document.getElementById('video-call-local-frame');
@@ -2931,47 +2899,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         callerAvatar: storedUser.profileImage
       });
 
-      // Simulation fallback: Auto-answer the call after 3 seconds so the UI proceeds
-      setTimeout(() => {
-        if (isCallActive && document.getElementById('video-call-outgoing-screen').style.display !== 'none') {
-          document.getElementById('video-call-outgoing-screen').style.display = 'none';
-          document.getElementById('video-call-active-screen').style.display = 'block';
-          document.getElementById('video-call-controls').style.display = 'block';
-          startVideoCallTimer();
-          stopAudioFeedback();
-          showToast('Call connected! 📞');
-
-          const remoteVideo = document.getElementById('video-call-remote-feed');
-          const localFrame = document.getElementById('video-call-local-frame');
-          const audioContainer = document.getElementById('audio-call-active-container');
-          const remoteNameTag = document.getElementById('video-call-remote-name');
-
-          if (isAudioOnly) {
-            if (remoteVideo) remoteVideo.style.display = 'none';
-            if (localFrame) localFrame.style.display = 'none';
-            if (remoteNameTag) remoteNameTag.style.display = 'none';
-            if (audioContainer) {
-              audioContainer.style.display = 'flex';
-              const audioName = document.getElementById('audio-call-active-name');
-              const audioAvatar = document.getElementById('audio-call-active-avatar');
-              const user = getUserById(recipientId);
-              if (user && audioName) audioName.textContent = user.fullName;
-              if (user && audioAvatar) audioAvatar.src = user.profileImage || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&h=150&q=80';
-            }
-          } else {
-            if (remoteVideo) {
-              remoteVideo.style.display = 'block';
-              if (!remoteVideo.srcObject || remoteVideo.srcObject.getTracks().length === 0) {
-                 remoteVideo.srcObject = createFakeStream(false);
-                 remoteVideo.play().catch(e => {});
-              }
-            }
-            if (localFrame) localFrame.style.display = 'block';
-            if (remoteNameTag) remoteNameTag.style.display = 'block';
-            if (audioContainer) audioContainer.style.display = 'none';
-          }
-        }
-      }, 3000);
 
     } catch (err) {
       console.error("Error initiating call:", err);
@@ -3031,13 +2958,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         ? { video: false, audio: true } 
         : { video: true, audio: true };
 
-      try {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('Not supported');
-        localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
-      } catch (err) {
-        console.warn('Camera/Mic error or unavailable. Using simulated stream.', err);
-        localStream = createFakeStream(call.isAudioOnly);
-      }
+      localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
 
       const localVideo = document.getElementById('video-call-local-feed');
       const localFrame = document.getElementById('video-call-local-frame');
@@ -3227,15 +3148,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   if (shareBtn) {
     shareBtn.addEventListener('click', async () => {
-      if (fakeCallSimulation) {
-        shareBtn.classList.toggle('active');
-        if (shareBtn.classList.contains('active')) {
-          showToast('Screen sharing initialized! 🖥️');
-        } else {
-          showToast('Screen sharing stopped.');
-        }
-        return;
-      }
+
 
       if (!shareBtn.classList.contains('active')) {
         try {

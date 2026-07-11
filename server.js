@@ -135,7 +135,8 @@ app.get('/{*splat}', (req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
-if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+// Start HTTP + WebSocket server on Render and locally, but NOT on Vercel (serverless)
+if (!process.env.VERCEL) {
   httpServer.listen(PORT, () => {
     console.log(`Backend server (HTTP + WebSockets) running on port ${PORT} with Supabase`);
   });
