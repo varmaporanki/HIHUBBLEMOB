@@ -2869,19 +2869,18 @@ document.addEventListener('DOMContentLoaded', async () => {
       };
 
       peerConnection.ontrack = (event) => {
-        if (event.streams[0]) {
-          if (isAudioCall) {
-            const remoteAudio = document.getElementById('remote-audio-element');
-            if (remoteAudio) {
-              remoteAudio.srcObject = event.streams[0];
-              remoteAudio.play().catch(e => {});
-            }
-          } else {
-            const remoteVideo = document.getElementById('video-call-remote-feed');
-            if (remoteVideo) {
-              remoteVideo.srcObject = event.streams[0];
-              remoteVideo.play().catch(e => {});
-            }
+        const stream = (event.streams && event.streams.length > 0) ? event.streams[0] : new MediaStream([event.track]);
+        if (isAudioCall) {
+          const remoteAudio = document.getElementById('remote-audio-element');
+          if (remoteAudio && remoteAudio.srcObject !== stream) {
+            remoteAudio.srcObject = stream;
+            remoteAudio.play().catch(e => console.error("Audio play error:", e));
+          }
+        } else {
+          const remoteVideo = document.getElementById('video-call-remote-feed');
+          if (remoteVideo && remoteVideo.srcObject !== stream) {
+            remoteVideo.srcObject = stream;
+            remoteVideo.play().catch(e => console.error("Video play error:", e));
           }
         }
       };
@@ -2982,19 +2981,18 @@ document.addEventListener('DOMContentLoaded', async () => {
       };
 
       peerConnection.ontrack = (event) => {
-        if (event.streams[0]) {
-          if (call.isAudioOnly) {
-            const remoteAudio = document.getElementById('remote-audio-element');
-            if (remoteAudio) {
-              remoteAudio.srcObject = event.streams[0];
-              remoteAudio.play().catch(e => {});
-            }
-          } else {
-            const remoteVideo = document.getElementById('video-call-remote-feed');
-            if (remoteVideo) {
-              remoteVideo.srcObject = event.streams[0];
-              remoteVideo.play().catch(e => {});
-            }
+        const stream = (event.streams && event.streams.length > 0) ? event.streams[0] : new MediaStream([event.track]);
+        if (call.isAudioOnly) {
+          const remoteAudio = document.getElementById('remote-audio-element');
+          if (remoteAudio && remoteAudio.srcObject !== stream) {
+            remoteAudio.srcObject = stream;
+            remoteAudio.play().catch(e => console.error("Audio play error:", e));
+          }
+        } else {
+          const remoteVideo = document.getElementById('video-call-remote-feed');
+          if (remoteVideo && remoteVideo.srcObject !== stream) {
+            remoteVideo.srcObject = stream;
+            remoteVideo.play().catch(e => console.error("Video play error:", e));
           }
         }
       };
