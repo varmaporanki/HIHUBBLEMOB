@@ -1,13 +1,87 @@
 import './style.css'
 import './auth.css'
 import { initAuth } from './auth.js'
+import { io } from 'socket.io-client';
+export let socket;
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   const API_URL = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
     ? 'http://localhost:3000'
     : window.location.origin;
 
   initAuth();
+
+  socket = io(API_URL);
+  
+  const storedUserStr = localStorage.getItem('invibeUser');
+  if (storedUserStr) {
+    try {
+      const user = JSON.parse(storedUserStr);
+      socket.emit('register', user._id || user.id);
+    } catch(e) {}
+  }
+
+  window.pendingCandidates = [];
+
+  socket.on('incoming-call', (data) => {
+    // data has { callerId, callerName, callerAvatar, offer, isAudioOnly }
+    showIncomingCallModal(data);
+  });
+  
+  socket.on('call-accepted', async (data) => {
+    if (peerConnection) {
+      const answerDesc = new RTCSessionDescription(data.answer);
+      await peerConnection.setRemoteDescription(answerDesc);
+      console.log('[WebRTC] Remote answer set successfully via socket');
+      
+      if (window.pendingCandidates.length > 0) {
+        window.pendingCandidates.forEach(cand => {
+          try { peerConnection.addIceCandidate(new RTCIceCandidate(cand)); } catch(e){}
+        });
+        window.pendingCandidates = [];
+      }
+      
+      // UI transition
+      document.getElementById('video-call-outgoing-screen').style.display = 'none';
+      document.getElementById('video-call-active-screen').style.display = 'block';
+      document.getElementById('video-call-controls').style.display = 'block';
+      startVideoCallTimer();
+      stopAudioFeedback();
+    }
+  });
+  
+  socket.on('call-declined', () => {
+    showToast('Call Declined. 📞');
+    playCallEndBeep();
+    endVideoCallLocally();
+  });
+  
+  socket.on('call-ended', () => {
+    showToast('Call Ended.');
+    playCallEndBeep();
+    endVideoCallLocally();
+  });
+  
+  socket.on('ice-candidate', (data) => {
+    if (peerConnection && peerConnection.remoteDescription) {
+      peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(e=>console.error(e));
+    } else {
+      window.pendingCandidates.push(data.candidate);
+    }
+  });
+
+  async function fetchTurnCredentials() {
+    try {
+      const res = await fetch(`${API_URL}/api/turn-credentials`);
+      if (res.ok) {
+        const token = await res.json();
+        return { iceServers: token.iceServers };
+      }
+    } catch (e) {
+      console.error("TURN fetch error", e);
+    }
+    return { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+  }
   
   // Initialize Lucide Icons (Debounced for performance)
   let iconRenderQueued = false;
@@ -2559,7 +2633,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let fakeCallSimulation = false;
   let isAudioCall = false;
 
-  const rtcConfig = {
+  let rtcConfig = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
@@ -2701,20 +2775,9 @@ document.addEventListener('DOMContentLoaded', () => {
     return `${h}:${m}:${s}`;
   }
 
-  let iceCandidateSendPromise = Promise.resolve();
 
-  async function sendIceCandidateToServer(callId, candidate, role) {
-    iceCandidateSendPromise = iceCandidateSendPromise.then(async () => {
-      try {
-        await fetch(`${API_URL}/api/calls/ice-candidate`, {
-          method: 'POST',
-          headers: getAuthHeaders(),
-          body: JSON.stringify({ callId, candidate, role })
-        });
-      } catch (e) {
-        console.error("Error sending ICE candidate:", e);
-      }
-    });
+  function sendIceCandidateToServer(targetId, candidate) {
+    socket.emit('ice-candidate', { targetId, candidate });
   }
 
   async function initiateVideoCall(recipientId, isAudioOnly = false) {
@@ -2723,14 +2786,11 @@ document.addEventListener('DOMContentLoaded', () => {
     isCaller = true;
     isAudioCall = isAudioOnly;
     currentRecipientId = recipientId;
-    fakeCallSimulation = false;
 
-    // Show outgoing screen, hide active call screen and controls
     document.getElementById('video-call-active-screen').style.display = 'none';
     document.getElementById('video-call-outgoing-screen').style.display = 'flex';
     document.getElementById('video-call-controls').style.display = 'none';
 
-    // Populate outgoing screen metadata
     const user = getUserById(recipientId);
     if (user) {
       document.getElementById('video-call-outgoing-name').textContent = user.fullName;
@@ -2738,148 +2798,75 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const outgoingStatus = document.getElementById('video-call-outgoing-status');
-    if (outgoingStatus) {
-      outgoingStatus.textContent = isAudioOnly ? 'Audio Calling...' : 'Calling...';
-    }
+    if (outgoingStatus) outgoingStatus.textContent = isAudioOnly ? 'Audio Calling...' : 'Calling...';
 
     startOutgoingRingback();
 
     try {
-      // 1. Get media permission
+      rtcConfig = await fetchTurnCredentials();
+      
       const mediaConstraints = isAudioOnly 
         ? { video: false, audio: true } 
         : { video: true, audio: true };
 
-      localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints).catch(err => {
-        console.warn("Could not get media devices, falling back to mock call: ", err);
-        fakeCallSimulation = true;
-        return null;
-      });
+      localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
 
-      if (!fakeCallSimulation) {
-        // Set local stream to local preview video tag
-        const localVideo = document.getElementById('video-call-local-feed');
-        const localFrame = document.getElementById('video-call-local-frame');
-        if (localVideo) {
-          if (isAudioOnly) {
-            localVideo.srcObject = null;
-            if (localFrame) localFrame.style.display = 'none';
-          } else {
-            localVideo.srcObject = localStream;
-            localVideo.muted = true;
-            if (localFrame) localFrame.style.display = 'block';
-            localVideo.play().catch(e => console.log("video play error:", e));
-          }
+      const localVideo = document.getElementById('video-call-local-feed');
+      const localFrame = document.getElementById('video-call-local-frame');
+      if (localVideo) {
+        if (isAudioOnly) {
+          localVideo.srcObject = null;
+          if (localFrame) localFrame.style.display = 'none';
+        } else {
+          localVideo.srcObject = localStream;
+          localVideo.muted = true;
+          if (localFrame) localFrame.style.display = 'block';
+          localVideo.play().catch(e => {});
         }
-
-        // 2. Create PeerConnection
-        peerConnection = new RTCPeerConnection(rtcConfig);
-
-        // Add local tracks
-        localStream.getTracks().forEach(track => {
-          peerConnection.addTrack(track, localStream);
-        });
-
-        // ICE candidate handler
-        let iceCandidateQueue = [];
-        peerConnection.onicecandidate = (event) => {
-          if (event.candidate) {
-            if (currentCallId) {
-              sendIceCandidateToServer(currentCallId, event.candidate, 'caller');
-            } else {
-              iceCandidateQueue.push(event.candidate);
-            }
-          }
-        };
-
-        // Remote track handler
-        peerConnection.ontrack = (event) => {
-          console.log('[WebRTC] Caller ontrack fired, kind:', event.track.kind);
-          if (event.streams[0]) {
-            if (isAudioCall) {
-              // For audio calls, use the dedicated <audio> element (video container is hidden)
-              const remoteAudio = document.getElementById('remote-audio-element');
-              if (remoteAudio) {
-                remoteAudio.srcObject = event.streams[0];
-                remoteAudio.play().catch(e => console.log('remote audio play error:', e));
-              }
-            } else {
-              const remoteVideo = document.getElementById('video-call-remote-feed');
-              if (remoteVideo) {
-                remoteVideo.srcObject = event.streams[0];
-                remoteVideo.play().catch(e => console.log('remote play error:', e));
-              }
-            }
-          }
-        };
-
-        // ICE connection state monitoring
-        peerConnection.oniceconnectionstatechange = () => {
-          console.log('[WebRTC] Caller ICE state:', peerConnection.iceConnectionState);
-          if (peerConnection.iceConnectionState === 'failed') {
-            console.error('[WebRTC] ICE connection failed — attempting restart');
-            peerConnection.restartIce();
-          } else if (peerConnection.iceConnectionState === 'disconnected') {
-            console.warn('[WebRTC] ICE disconnected — waiting for reconnection...');
-          } else if (peerConnection.iceConnectionState === 'connected' || peerConnection.iceConnectionState === 'completed') {
-            console.log('[WebRTC] ICE connected successfully!');
-          }
-        };
-
-        // Create Offer
-        const offer = await peerConnection.createOffer();
-        await peerConnection.setLocalDescription(offer);
-
-        // Send Offer to Server
-        const offerPayload = {
-          type: offer.type,
-          sdp: offer.sdp,
-          isAudioOnly: isAudioOnly
-        };
-
-        const res = await fetch(`${API_URL}/api/calls/initiate`, {
-          method: 'POST',
-          headers: getAuthHeaders(),
-          body: JSON.stringify({
-            recipientId,
-            offer: JSON.stringify(offerPayload)
-          })
-        });
-
-        if (!res.ok) throw new Error("Failed to initiate call on server.");
-        const callData = await res.json();
-        currentCallId = callData._id || callData.id;
-
-        // Flush queued ICE candidates
-        if (typeof iceCandidateQueue !== 'undefined') {
-          iceCandidateQueue.forEach(cand => {
-            sendIceCandidateToServer(currentCallId, cand, 'caller');
-          });
-          iceCandidateQueue = [];
-        }
-      } else {
-        // Mock Call initiation on server (just so signaling works for matching UI state)
-        const offerPayload = {
-          type: 'offer',
-          sdp: 'mock',
-          isAudioOnly: isAudioOnly
-        };
-
-        const res = await fetch(`${API_URL}/api/calls/initiate`, {
-          method: 'POST',
-          headers: getAuthHeaders(),
-          body: JSON.stringify({
-            recipientId,
-            offer: JSON.stringify(offerPayload)
-          })
-        });
-        if (!res.ok) throw new Error("Failed to initiate call on server.");
-        const callData = await res.json();
-        currentCallId = callData._id || callData.id;
       }
 
-      // Start polling for accept status
-      startCallStatePolling();
+      peerConnection = new RTCPeerConnection(rtcConfig);
+
+      localStream.getTracks().forEach(track => {
+        peerConnection.addTrack(track, localStream);
+      });
+
+      peerConnection.onicecandidate = (event) => {
+        if (event.candidate && currentRecipientId) {
+          sendIceCandidateToServer(currentRecipientId, event.candidate);
+        }
+      };
+
+      peerConnection.ontrack = (event) => {
+        if (event.streams[0]) {
+          if (isAudioCall) {
+            const remoteAudio = document.getElementById('remote-audio-element');
+            if (remoteAudio) {
+              remoteAudio.srcObject = event.streams[0];
+              remoteAudio.play().catch(e => {});
+            }
+          } else {
+            const remoteVideo = document.getElementById('video-call-remote-feed');
+            if (remoteVideo) {
+              remoteVideo.srcObject = event.streams[0];
+              remoteVideo.play().catch(e => {});
+            }
+          }
+        }
+      };
+
+      const offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+
+      const storedUser = JSON.parse(localStorage.getItem('invibeUser'));
+      socket.emit('call-initiate', {
+        recipientId,
+        offer,
+        isAudioOnly,
+        callerId: storedUser._id || storedUser.id,
+        callerName: storedUser.fullName,
+        callerAvatar: storedUser.profileImage
+      });
 
     } catch (err) {
       console.error("Error initiating call:", err);
@@ -2888,309 +2875,30 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function startCallStatePolling() {
-    if (callStatePollingInterval) clearInterval(callStatePollingInterval);
-    
-    let processedCandidates = new Set();
-    let pendingCandidates = []; // Buffer for candidates received before remoteDescription is set
-    let callerAnswerProcessed = false;
-    let pollCount = 0;
-
-    async function pollCallState() {
-      if (!currentCallId) return;
-
-      try {
-        const res = await fetch(`${API_URL}/api/calls/${currentCallId}/state`, {
-          headers: getAuthHeaders()
-        });
-        if (!res.ok) return;
-
-        const data = await res.json();
-        pollCount++;
-
-        // --- CALLER: Process answer when call is accepted ---
-        if (isCaller && data.status === 'connected' && isCallActive) {
-          // Process the answer SDP (do this on every poll until processed, not just UI transition)
-          if (!callerAnswerProcessed && !fakeCallSimulation && data.answer) {
-            const answerData = JSON.parse(data.answer);
-            if (answerData.sdp === 'mock') {
-              fakeCallSimulation = true;
-              callerAnswerProcessed = true;
-              if (!isAudioCall) switchToSimulationFeeds();
-            } else {
-              const answerDesc = new RTCSessionDescription(answerData);
-              if (peerConnection && peerConnection.signalingState === 'have-local-offer') {
-                await peerConnection.setRemoteDescription(answerDesc);
-                callerAnswerProcessed = true;
-                console.log('[WebRTC] Caller: remote answer set successfully');
-
-                // Flush any buffered candidates now that remoteDescription is set
-                if (pendingCandidates.length > 0) {
-                  console.log('[WebRTC] Flushing', pendingCandidates.length, 'buffered candidates');
-                  pendingCandidates.forEach(cand => {
-                    try {
-                      peerConnection.addIceCandidate(new RTCIceCandidate(cand));
-                    } catch(e) { console.error('Error adding buffered candidate:', e); }
-                  });
-                  pendingCandidates = [];
-                }
-              }
-            }
-          } else if (fakeCallSimulation && !callerAnswerProcessed) {
-            callerAnswerProcessed = true;
-            if (!isAudioCall) switchToSimulationFeeds();
-          }
-
-          // UI transition (only once)
-          if (document.getElementById('video-call-active-screen').style.display === 'none') {
-            stopAudioFeedback();
-            
-            // Switch to active view
-            document.getElementById('video-call-outgoing-screen').style.display = 'none';
-            document.getElementById('video-call-active-screen').style.display = 'block';
-            document.getElementById('video-call-controls').style.display = 'block';
-            
-            startVideoCallTimer();
-            
-            const camBtn = document.getElementById('call-cam-btn');
-            const shareBtn = document.getElementById('call-share-btn');
-            if (camBtn) camBtn.style.display = isAudioCall ? 'none' : 'flex';
-            if (shareBtn) shareBtn.style.display = isAudioCall ? 'none' : 'flex';
-
-            if (isAudioCall) {
-              const remoteContainer = document.getElementById('remote-video-container');
-              const localFrame = document.getElementById('video-call-local-frame');
-              const audioContainer = document.getElementById('audio-call-active-container');
-              if (remoteContainer) remoteContainer.style.display = 'none';
-              if (localFrame) localFrame.style.display = 'none';
-              if (audioContainer) {
-                audioContainer.style.display = 'flex';
-                const user = getUserById(currentRecipientId);
-                if (user) {
-                  const activeAvatar = document.getElementById('audio-call-active-avatar');
-                  const activeName = document.getElementById('audio-call-active-name');
-                  if (activeAvatar) activeAvatar.src = user.profileImage || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&h=150&q=80';
-                  if (activeName) activeName.textContent = user.fullName;
-                }
-              }
-            } else {
-              const remoteContainer = document.getElementById('remote-video-container');
-              const localFrame = document.getElementById('video-call-local-frame');
-              const audioContainer = document.getElementById('audio-call-active-container');
-              if (remoteContainer) remoteContainer.style.display = 'block';
-              if (localFrame) localFrame.style.display = 'block';
-              if (audioContainer) audioContainer.style.display = 'none';
-              
-              // Update remote name
-              const user = getUserById(currentRecipientId);
-              if (user) {
-                document.getElementById('video-call-remote-name').textContent = user.fullName;
-              }
-            }
-          }
-        }
-
-        // --- Process peer ICE candidates (runs on EVERY poll, not just first transition) ---
-        if (!fakeCallSimulation && peerConnection && data.peerCandidates && data.peerCandidates.length > 0) {
-          data.peerCandidates.forEach(cand => {
-            const candId = cand.candidate || JSON.stringify(cand);
-            if (!processedCandidates.has(candId)) {
-              processedCandidates.add(candId);
-              if (peerConnection.remoteDescription) {
-                try {
-                  peerConnection.addIceCandidate(new RTCIceCandidate(cand));
-                } catch(e) { console.error('Error adding candidate:', e); }
-              } else {
-                // Buffer candidate until remoteDescription is set
-                pendingCandidates.push(cand);
-              }
-            }
-          });
-        }
-
-        // If call declined or ended
-        if (data.status === 'declined' || data.status === 'ended') {
-          showToast(data.status === 'declined' ? 'Call Declined. 📞' : 'Call Ended.');
-          playCallEndBeep();
-          endVideoCallLocally();
-        }
-
-      } catch (err) {
-        console.error('Error polling call state:', err);
-      }
-    }
-
-    // Fast initial polling burst (every 500ms for first 10 seconds) then slow down to 1s
-    const fastPollInterval = setInterval(() => {
-      pollCallState();
-    }, 500);
-
-    setTimeout(() => {
-      clearInterval(fastPollInterval);
-    }, 10000);
-
-    // Standard polling at 1s (runs in parallel during burst, continues after)
-    callStatePollingInterval = setInterval(pollCallState, 1000);
-
-    // Store reference to fast poll so we can clean it up
-    const origClear = callStatePollingInterval;
-    const origEndCall = endVideoCallLocally;
-  }
-
-  function endVideoCallLocally() {
-    isCallActive = false;
-    stopVideoCallTimer();
-    stopAudioFeedback();
-    
-    if (callStatePollingInterval) {
-      clearInterval(callStatePollingInterval);
-      callStatePollingInterval = null;
-    }
-
-    if (localStream) {
-      localStream.getTracks().forEach(track => track.stop());
-      localStream = null;
-    }
-    
-    if (localScreenStream) {
-      localScreenStream.getTracks().forEach(track => track.stop());
-      localScreenStream = null;
-    }
-
-    if (peerConnection) {
-      peerConnection.close();
-      peerConnection = null;
-    }
-
-    const localVideo = document.getElementById('video-call-local-feed');
-    if (localVideo) {
-      localVideo.srcObject = null;
-      localVideo.removeAttribute('src');
-    }
-
-    const remoteVideo = document.getElementById('video-call-remote-feed');
-    if (remoteVideo) {
-      remoteVideo.srcObject = null;
-      remoteVideo.removeAttribute('src');
-    }
-
-    // Clean up the dedicated audio element
-    const remoteAudio = document.getElementById('remote-audio-element');
-    if (remoteAudio) {
-      remoteAudio.srcObject = null;
-    }
-
-    currentCallId = null;
-    currentRecipientId = null;
-    isAudioCall = false;
-
-    // Reset controls UI state
-    const muteBtn = document.getElementById('call-mute-btn');
-    const camBtn = document.getElementById('call-cam-btn');
-    const shareBtn = document.getElementById('call-share-btn');
-    if (muteBtn) muteBtn.classList.remove('active');
-    if (camBtn) {
-      camBtn.classList.remove('active');
-      camBtn.style.display = 'flex';
-    }
-    if (shareBtn) {
-      shareBtn.classList.remove('active');
-      shareBtn.style.display = 'flex';
-    }
-
-    // Reset active panels visibility
-    const remoteContainer = document.getElementById('remote-video-container');
-    const localFrame = document.getElementById('video-call-local-frame');
-    const audioContainer = document.getElementById('audio-call-active-container');
-    if (remoteContainer) remoteContainer.style.display = 'block';
-    if (localFrame) localFrame.style.display = 'block';
-    if (audioContainer) audioContainer.style.display = 'none';
-
-    // Switch chat layout back to normal chat mode
-    switchChatMode('chat');
-  }
-
-  function switchToSimulationFeeds() {
-    const remoteVideo = document.getElementById('video-call-remote-feed');
-    if (remoteVideo) {
-      remoteVideo.srcObject = null;
-      remoteVideo.src = 'https://assets.mixkit.co/videos/preview/mixkit-girl-in-neon-sign-in-front-of-a-store-34320-large.mp4';
-      remoteVideo.loop = true;
-      remoteVideo.muted = true;
-      remoteVideo.play().catch(e => console.log("remote mock play error:", e));
-    }
-    const localVideo = document.getElementById('video-call-local-feed');
-    if (localVideo) {
-      localVideo.srcObject = null;
-      localVideo.src = 'https://assets.mixkit.co/videos/preview/mixkit-spinning-vinyl-record-on-a-turntable-42318-large.mp4';
-      localVideo.loop = true;
-      localVideo.muted = true;
-      localVideo.play().catch(e => console.log("local mock play error:", e));
-    }
-  }
-
-  async function checkForIncomingCall() {
-    if (isCallActive) return;
-
-    try {
-      const res = await fetch(`${API_URL}/api/calls/incoming`, {
-        headers: getAuthHeaders()
-      });
-      if (!res.ok) return;
-
-      const call = await res.json();
-      if (call && call.status === 'ringing') {
-        showIncomingCallModal(call);
-      }
-    } catch (e) {
-      console.error("Error checking incoming calls:", e);
-    }
-  }
-
   function showIncomingCallModal(call) {
+    if (isCallActive) return; // Ignore if already in call
     isCallActive = true;
     isCaller = false;
-    currentCallId = call._id || call.id;
-    currentRecipientId = call.caller._id || call.caller.id;
-    fakeCallSimulation = false;
-
-    // Determine if it is audio only call
-    let isAudioOnlyCall = false;
-    try {
-      const parsedOffer = JSON.parse(call.offer);
-      if (parsedOffer && parsedOffer.isAudioOnly) {
-        isAudioOnlyCall = true;
-      }
-    } catch (e) {
-      if (call.offer && !call.offer.includes('m=video')) {
-        isAudioOnlyCall = true;
-      }
-    }
-    isAudioCall = isAudioOnlyCall;
+    currentRecipientId = call.callerId;
+    isAudioCall = call.isAudioOnly;
 
     const modal = document.getElementById('incoming-call-modal');
     const avatar = document.getElementById('incoming-call-avatar');
     const name = document.getElementById('incoming-call-name');
     const title = document.getElementById('incoming-call-title');
 
-    if (avatar) avatar.src = call.caller.profileImage || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&h=150&q=80';
-    if (name) name.textContent = `${call.caller.fullName} is calling you...`;
-    if (title) title.textContent = isAudioOnlyCall ? 'Incoming Audio Call' : 'Incoming Video Call';
+    if (avatar) avatar.src = call.callerAvatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&h=150&q=80';
+    if (name) name.textContent = `${call.callerName} is calling you...`;
+    if (title) title.textContent = isAudioCall ? 'Incoming Audio Call' : 'Incoming Video Call';
 
     if (modal) modal.style.display = 'flex';
     startIncomingRingtone();
 
-    // Hook up Accept / Decline listeners
     const acceptBtn = document.getElementById('accept-call-btn');
     const declineBtn = document.getElementById('decline-call-btn');
 
-    acceptBtn.onclick = () => {
-      acceptIncomingCall(call);
-    };
-
-    declineBtn.onclick = () => {
-      declineIncomingCall(call);
-    };
+    acceptBtn.onclick = () => acceptIncomingCall(call);
+    declineBtn.onclick = () => declineIncomingCall(call);
   }
 
   async function acceptIncomingCall(call) {
@@ -3198,202 +2906,80 @@ document.addEventListener('DOMContentLoaded', () => {
     const modal = document.getElementById('incoming-call-modal');
     if (modal) modal.style.display = 'none';
 
-    // Set current chat thread to the caller
-    state.currentChatThread = call.caller._id || call.caller.id;
+    state.currentChatThread = call.callerId;
     switchView('chats');
+    switchChatMode(call.isAudioOnly ? 'voice-call' : 'call');
 
-    // Trigger UI selection of the thread item
-    const threadItem = document.querySelector(`.thread-item[data-thread="${state.currentChatThread}"]`);
-    if (threadItem) {
-      threadItem.click();
-    } else {
-      const chatHeaderName = document.getElementById('chat-header-name');
-      const chatHeaderAvatar = document.getElementById('chat-header-avatar');
-      if (chatHeaderName) chatHeaderName.textContent = call.caller.fullName;
-      if (chatHeaderAvatar) chatHeaderAvatar.src = call.caller.profileImage;
-      
-      const emptyState = document.getElementById('chat-empty-state');
-      const chatHeader = document.getElementById('chat-window-header');
-      const chatViewport = document.querySelector('.chat-dynamic-viewport');
-      if (emptyState) emptyState.style.display = 'none';
-      if (chatHeader) chatHeader.style.display = '';
-      if (chatViewport) chatViewport.style.display = '';
-    }
-
-    // Determine if it is audio only call
-    let isAudioOnlyCall = false;
-    let offerData = null;
-    try {
-      offerData = JSON.parse(call.offer);
-      if (offerData && offerData.isAudioOnly) {
-        isAudioOnlyCall = true;
-      }
-    } catch (e) {
-      offerData = call.offer;
-      if (call.offer && !call.offer.includes('m=video')) {
-        isAudioOnlyCall = true;
-      }
-    }
-    isAudioCall = isAudioOnlyCall;
-
-    switchChatMode(isAudioOnlyCall ? 'voice-call' : 'call');
-
-    // Setup UI
     document.getElementById('video-call-outgoing-screen').style.display = 'none';
     document.getElementById('video-call-active-screen').style.display = 'block';
     document.getElementById('video-call-controls').style.display = 'block';
 
-    const camBtn = document.getElementById('call-cam-btn');
-    const shareBtn = document.getElementById('call-share-btn');
-    if (camBtn) camBtn.style.display = isAudioOnlyCall ? 'none' : 'flex';
-    if (shareBtn) shareBtn.style.display = isAudioOnlyCall ? 'none' : 'flex';
-
-    if (isAudioOnlyCall) {
-      const remoteContainer = document.getElementById('remote-video-container');
-      const localFrame = document.getElementById('video-call-local-frame');
-      const audioContainer = document.getElementById('audio-call-active-container');
-      if (remoteContainer) remoteContainer.style.display = 'none';
-      if (localFrame) localFrame.style.display = 'none';
-      if (audioContainer) {
-        audioContainer.style.display = 'flex';
-        const activeAvatar = document.getElementById('audio-call-active-avatar');
-        const activeName = document.getElementById('audio-call-active-name');
-        if (activeAvatar) activeAvatar.src = call.caller.profileImage || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&h=150&q=80';
-        if (activeName) activeName.textContent = call.caller.fullName;
-      }
-    } else {
-      const remoteContainer = document.getElementById('remote-video-container');
-      const localFrame = document.getElementById('video-call-local-frame');
-      const audioContainer = document.getElementById('audio-call-active-container');
-      if (remoteContainer) remoteContainer.style.display = 'block';
-      if (localFrame) localFrame.style.display = 'block';
-      if (audioContainer) audioContainer.style.display = 'none';
-    }
-
     const remoteName = document.getElementById('video-call-remote-name');
-    if (remoteName) remoteName.textContent = call.caller.fullName;
+    if (remoteName) remoteName.textContent = call.callerName;
 
     startVideoCallTimer();
 
     try {
-      if (offerData && offerData.sdp === 'mock') {
-        fakeCallSimulation = true;
-      }
+      rtcConfig = await fetchTurnCredentials();
 
-      const mediaConstraints = isAudioOnlyCall 
+      const mediaConstraints = call.isAudioOnly 
         ? { video: false, audio: true } 
         : { video: true, audio: true };
 
-      localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints).catch(err => {
-        console.warn("Could not get media devices, falling back to mock call: ", err);
-        fakeCallSimulation = true;
-        return null;
+      localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
+
+      const localVideo = document.getElementById('video-call-local-feed');
+      const localFrame = document.getElementById('video-call-local-frame');
+      if (localVideo && !call.isAudioOnly) {
+        localVideo.srcObject = localStream;
+        localVideo.muted = true;
+        if (localFrame) localFrame.style.display = 'block';
+        localVideo.play().catch(e => {});
+      }
+
+      peerConnection = new RTCPeerConnection(rtcConfig);
+
+      localStream.getTracks().forEach(track => {
+        peerConnection.addTrack(track, localStream);
       });
 
-      if (!fakeCallSimulation) {
-        const localVideo = document.getElementById('video-call-local-feed');
-        const localFrame = document.getElementById('video-call-local-frame');
-        if (localVideo) {
-          if (isAudioOnlyCall) {
-            localVideo.srcObject = null;
-            if (localFrame) localFrame.style.display = 'none';
-          } else {
-            localVideo.srcObject = localStream;
-            localVideo.muted = true;
-            if (localFrame) localFrame.style.display = 'block';
-            localVideo.play().catch(e => console.log("video play error:", e));
-          }
+      peerConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+          sendIceCandidateToServer(call.callerId, event.candidate);
         }
+      };
 
-        peerConnection = new RTCPeerConnection(rtcConfig);
-
-        localStream.getTracks().forEach(track => {
-          peerConnection.addTrack(track, localStream);
-        });
-
-        peerConnection.onicecandidate = (event) => {
-          if (event.candidate && currentCallId) {
-            sendIceCandidateToServer(currentCallId, event.candidate, 'recipient');
-          }
-        };
-
-        peerConnection.ontrack = (event) => {
-          console.log('[WebRTC] Recipient ontrack fired, kind:', event.track.kind);
-          if (event.streams[0]) {
-            if (isAudioOnlyCall) {
-              // For audio calls, use the dedicated <audio> element (video container is hidden)
-              const remoteAudio = document.getElementById('remote-audio-element');
-              if (remoteAudio) {
-                remoteAudio.srcObject = event.streams[0];
-                remoteAudio.play().catch(e => console.log('remote audio play error:', e));
-              }
-            } else {
-              const remoteVideo = document.getElementById('video-call-remote-feed');
-              if (remoteVideo) {
-                remoteVideo.srcObject = event.streams[0];
-                remoteVideo.play().catch(e => console.log('remote play error:', e));
-              }
+      peerConnection.ontrack = (event) => {
+        if (event.streams[0]) {
+          if (call.isAudioOnly) {
+            const remoteAudio = document.getElementById('remote-audio-element');
+            if (remoteAudio) {
+              remoteAudio.srcObject = event.streams[0];
+              remoteAudio.play().catch(e => {});
+            }
+          } else {
+            const remoteVideo = document.getElementById('video-call-remote-feed');
+            if (remoteVideo) {
+              remoteVideo.srcObject = event.streams[0];
+              remoteVideo.play().catch(e => {});
             }
           }
-        };
-
-        // ICE connection state monitoring
-        peerConnection.oniceconnectionstatechange = () => {
-          console.log('[WebRTC] Recipient ICE state:', peerConnection.iceConnectionState);
-          if (peerConnection.iceConnectionState === 'failed') {
-            console.error('[WebRTC] ICE connection failed — attempting restart');
-            peerConnection.restartIce();
-          } else if (peerConnection.iceConnectionState === 'disconnected') {
-            console.warn('[WebRTC] ICE disconnected — waiting for reconnection...');
-          } else if (peerConnection.iceConnectionState === 'connected' || peerConnection.iceConnectionState === 'completed') {
-            console.log('[WebRTC] ICE connected successfully!');
-          }
-        };
-
-        // Set remote offer SDP (remove isAudioOnly metadata for session description creation)
-        const offerDesc = new RTCSessionDescription({
-          type: offerData.type,
-          sdp: offerData.sdp
-        });
-        await peerConnection.setRemoteDescription(offerDesc);
-
-        // Create Answer
-        const answer = await peerConnection.createAnswer();
-        await peerConnection.setLocalDescription(answer);
-
-        // Accept call on server
-        await fetch(`${API_URL}/api/calls/accept`, {
-          method: 'POST',
-          headers: getAuthHeaders(),
-          body: JSON.stringify({
-            callId: currentCallId,
-            answer: JSON.stringify(answer)
-          })
-        });
-
-        startCallStatePolling();
-      } else {
-        // Mock call answer on server
-        await fetch(`${API_URL}/api/calls/accept`, {
-          method: 'POST',
-          headers: getAuthHeaders(),
-          body: JSON.stringify({
-            callId: currentCallId,
-            answer: JSON.stringify({ type: 'answer', sdp: 'mock' })
-          })
-        });
-
-        if (!isAudioOnlyCall) {
-          switchToSimulationFeeds();
-        } else {
-          // Clear mock feeds for audio calls
-          const localVideo = document.getElementById('video-call-local-feed');
-          if (localVideo) {
-            localVideo.srcObject = null;
-            localVideo.removeAttribute('src');
-          }
         }
-        startCallStatePolling();
+      };
+
+      const offerDesc = new RTCSessionDescription(call.offer);
+      await peerConnection.setRemoteDescription(offerDesc);
+
+      const answer = await peerConnection.createAnswer();
+      await peerConnection.setLocalDescription(answer);
+
+      socket.emit('call-accept', { callerId: call.callerId, answer });
+
+      if (window.pendingCandidates && window.pendingCandidates.length > 0) {
+        window.pendingCandidates.forEach(cand => {
+          try { peerConnection.addIceCandidate(new RTCIceCandidate(cand)); } catch(e){}
+        });
+        window.pendingCandidates = [];
       }
 
     } catch (err) {
@@ -3403,39 +2989,65 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  async function declineIncomingCall(call) {
+  function declineIncomingCall(call) {
     stopAudioFeedback();
     const modal = document.getElementById('incoming-call-modal');
     if (modal) modal.style.display = 'none';
 
-    try {
-      await fetch(`${API_URL}/api/calls/decline`, {
-        method: 'POST',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({ callId: call._id || call.id })
-      });
-    } catch (e) {
-      console.error("Error declining call:", e);
-    }
-
+    socket.emit('call-decline', { callerId: call.callerId });
     endVideoCallLocally();
   }
 
-  async function cancelOutgoingCall() {
+  function cancelOutgoingCall() {
     stopAudioFeedback();
-    if (currentCallId) {
-      try {
-        await fetch(`${API_URL}/api/calls/end`, {
-          method: 'POST',
-          headers: getAuthHeaders(),
-          body: JSON.stringify({ callId: currentCallId })
-        });
-      } catch (e) {}
+    if (currentRecipientId) {
+      socket.emit('call-end', { targetId: currentRecipientId });
     }
     endVideoCallLocally();
   }
 
-  // Set up listeners for controls
+  function endVideoCallLocally() {
+    isCallActive = false;
+    stopVideoCallTimer();
+    stopAudioFeedback();
+    
+    if (localStream) {
+      localStream.getTracks().forEach(track => track.stop());
+      localStream = null;
+    }
+    if (peerConnection) {
+      peerConnection.close();
+      peerConnection = null;
+    }
+
+    const localVideo = document.getElementById('video-call-local-feed');
+    if (localVideo) localVideo.srcObject = null;
+    const remoteVideo = document.getElementById('video-call-remote-feed');
+    if (remoteVideo) remoteVideo.srcObject = null;
+    const remoteAudio = document.getElementById('remote-audio-element');
+    if (remoteAudio) remoteAudio.srcObject = null;
+
+    currentRecipientId = null;
+    isAudioCall = false;
+    window.pendingCandidates = [];
+
+    const muteBtn = document.getElementById('call-mute-btn');
+    const camBtn = document.getElementById('call-cam-btn');
+    if (muteBtn) muteBtn.classList.remove('active');
+    if (camBtn) camBtn.classList.remove('active');
+
+    const remoteContainer = document.getElementById('remote-video-container');
+    const localFrame = document.getElementById('video-call-local-frame');
+    const audioContainer = document.getElementById('audio-call-active-container');
+    if (remoteContainer) remoteContainer.style.display = 'block';
+    if (localFrame) localFrame.style.display = 'block';
+    if (audioContainer) audioContainer.style.display = 'none';
+
+    switchChatMode('chat');
+  }
+
+
+    // Set up listeners for controls
   const cancelOutgoingBtn = document.getElementById('cancel-outgoing-call-btn');
   if (cancelOutgoingBtn) {
     cancelOutgoingBtn.addEventListener('click', () => {
