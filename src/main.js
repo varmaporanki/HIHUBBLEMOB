@@ -2780,6 +2780,39 @@ document.addEventListener('DOMContentLoaded', async () => {
     socket.emit('ice-candidate', { targetId, candidate });
   }
 
+  function createFakeStream(isAudioOnly) {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AudioContext();
+    const oscillator = ctx.createOscillator();
+    const dst = ctx.createMediaStreamDestination();
+    oscillator.start();
+    oscillator.connect(dst);
+    const audioTrack = dst.stream.getAudioTracks()[0];
+    audioTrack.enabled = false;
+
+    if (isAudioOnly) {
+      return new MediaStream([audioTrack]);
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 640;
+    canvas.height = 480;
+    const canvasCtx = canvas.getContext('2d');
+    
+    setInterval(() => {
+      canvasCtx.fillStyle = '#1e1e1e';
+      canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+      canvasCtx.fillStyle = '#ffffff';
+      canvasCtx.font = '30px Arial';
+      canvasCtx.fillText('Simulated Video Stream', 150, 240);
+    }, 1000);
+
+    const videoStream = canvas.captureStream(15);
+    const videoTrack = videoStream.getVideoTracks()[0];
+
+    return new MediaStream([audioTrack, videoTrack]);
+  }
+
   async function initiateVideoCall(recipientId, isAudioOnly = false) {
     if (isCallActive) return;
     isCallActive = true;
@@ -2809,7 +2842,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         ? { video: false, audio: true } 
         : { video: true, audio: true };
 
-      localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
+      try {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('Not supported');
+        localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
+      } catch (err) {
+        console.warn('Camera/Mic error or unavailable. Using simulated stream.', err);
+        localStream = createFakeStream(isAudioOnly);
+      }
 
       const localVideo = document.getElementById('video-call-local-feed');
       const localFrame = document.getElementById('video-call-local-frame');
@@ -2926,7 +2965,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         ? { video: false, audio: true } 
         : { video: true, audio: true };
 
-      localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
+      try {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('Not supported');
+        localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
+      } catch (err) {
+        console.warn('Camera/Mic error or unavailable. Using simulated stream.', err);
+        localStream = createFakeStream(call.isAudioOnly);
+      }
 
       const localVideo = document.getElementById('video-call-local-feed');
       const localFrame = document.getElementById('video-call-local-frame');
